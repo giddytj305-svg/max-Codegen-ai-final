@@ -1,79 +1,70 @@
-// /api/search.js
-
 import fetch from "node-fetch";
 
-const SERPAPI_URL = "https://serpapi.com/search.json";
+export const config = {
+  runtime: "edge", // ⚡ Fast on Vercel Edge
+};
 
-export default async function handler(req, res) {
-  // --- ✅ CORS setup
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
+export default async function handler(req) {
   try {
-    const { query } = req.body;
-    if (!query || typeof query !== "string") {
-      return res.status(400).json({ error: "Missing search query." });
+    const { prompt } = await req.json();
+
+    if (!prompt) {
+      return new Response(JSON.stringify({ error: "Missing prompt" }), { status: 400 });
     }
 
+    // 🔑 Your SerpAPI key (set this in Vercel dashboard)
     const apiKey = process.env.SERPAPI_KEY;
     if (!apiKey) {
-      return res.status(500).json({ error: "Missing SERPAPI_KEY in environment." });
+      return new Response(JSON.stringify({ error: "Missing SERPAPI_KEY" }), { status: 500 });
     }
 
-    // --- 🧠 Detect intent: image or text search
-    const wantsImages =
-      /photo|image|picture|pic|poster|wallpaper|logo|design|screenshot/i.test(query);
-
-    const params = new URLSearchParams({
-      q: query,
-      api_key: apiKey,
-      engine: wantsImages ? "google_images" : "google",
-      location: "Nairobi, Kenya", // optional region relevance
-      hl: "en",
-      gl: "ke",
-    });
-
-    // --- 🌐 Perform the search
-    const response = await fetch(`${SERPAPI_URL}?${params.toString()}`);
-    const data = await response.json();
-
-    // --- 🖼️ Extract results based on intent
-    let results = [];
-
-    if (wantsImages && data.images_results) {
-      results = data.images_results.slice(0, 5).map((img) => ({
-        title: img.title || "Image",
-        thumbnail: img.thumbnail,
-        source: img.source,
-        link: img.link,
-      }));
-    } else if (data.organic_results) {
-      results = data.organic_results.slice(0, 5).map((r) => ({
-        title: r.title,
-        snippet: r.snippet,
-        link: r.link,
-      }));
+    const lower = prompt.toLowerCase();
+    let searchType = "news";
+    if (lower.includes("image") || lower.includes("photo") || lower.includes("picture")) {
+      searchType = "image";
     }
 
-    // --- ✅ Return clean JSON
-    res.status(200).json({
-      type: wantsImages ? "image" : "text",
-      query,
-      results,
-      source: "SerpAPI",
-    });
+    let apiURL = "";
+    if (searchType === "image") {
+      // 🖼️ Google Images
+      apiURL = `https://serpapi.com/search.json?engine=google_images&q=${encodeURIComponent(
+        prompt
+      )}&api_key=${apiKey}`;
+    } else {
+      // 📰 News / general
+      apiURL = `https://serpapi.com/search.json?engine=google_news&q=${encodeURIComponent(
+        prompt
+      )}&api_key=${apiKey}`;
+    }
+
+    const res = await fetch(apiURL);
+    const data = await res.json();
+
+    if (searchType === "image") {
+      const images =
+        data.images_results?.slice(0, 8).map(img => ({
+          url: img.original || img.thumbnail,
+          title: img.title || "",
+        })) || [];
+      return new Response(JSON.stringify({ images }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } else {
+      const results =
+        data.news_results?.slice(0, 6).map(n => ({
+          title: n.title,
+          link: n.link,
+          snippet: n.snippet || n.source || "",
+        })) || [];
+      return new Response(JSON.stringify({ results }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   } catch (err) {
-    console.error("❌ Search error:", err);
-    res.status(500).json({
-      error: "Search failed",
-      details: err.message,
-    });
+    console.error(err);
+    return new Response(
+      JSON.stringify({ error: "Server error", details: err.message }),
+      { status: 500 }
+    );
   }
 }
