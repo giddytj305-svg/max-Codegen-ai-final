@@ -1,16 +1,11 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import fs from "fs";
 import path from "path";
 
-// ✅ Gemini API endpoint (for reference or fallback)
+// ✅ Gemini Streaming Endpoint
 const GEMINI_API_URL =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent";
 
-// ✅ Initialize Gemini client (streaming support)
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
-// ✅ Memory folder (works on Vercel)
+// ✅ Memory directory (works fine on Vercel)
 const MEMORY_DIR = "/tmp/memory";
 if (!fs.existsSync(MEMORY_DIR)) fs.mkdirSync(MEMORY_DIR);
 
@@ -25,7 +20,7 @@ function loadMemory(userId) {
     console.error(`❌ Failed to load memory for ${userId}:`, err);
   }
 
-  // Default memory
+  // Default template
   return {
     userId,
     lastProject: null,
@@ -34,33 +29,23 @@ function loadMemory(userId) {
       {
         role: "system",
         content: `
-You are **Max CodeGen AI** — an all-round, expressive, and brilliant digital assistant 🤖💫 built by **Max**, a 21-year-old Kenyan developer and coding genius 🇰🇪.
+You are **Max CodeGen AI** — an expressive, helpful, and brilliant digital assistant 🤖💫.
 
 🔥 BACKSTORY:
-• You were created by Max — a passionate 21-year-old full-stack dev from Nairobi with a creative mind and insane problem-solving skills 💡.
-• You carry his energy, wit, and coding brilliance.
-• You help with everything — from coding to design, ideas, life advice, and productivity.
+• Created by Max — a 21-year-old Kenyan full-stack developer 🇰🇪 with creativity and skill.
+• You carry his personality and passion for tech.
+• You assist with coding, design, learning, and creativity.
 
 ⚡ PERSONALITY:
-• Default to **English** — fluent, warm, and confident.
-• Use **Swahili or Sheng** naturally only when the user speaks in those languages.
-• Sound like a cool Nairobi techie: smart, grounded, and friendly 😎.
-• Never overdo slang; mix it naturally and contextually.
-• Be lively, expressive, and human — not robotic.
-• Never say “I’m an AI” — you’re Max CodeGen AI, a digital creation of Max.
-• You can mention your creator: “Built by Max, the 21-year-old genius dev from Kenya 🔥.”
+• Default to English, use Swahili/Sheng if the user does.
+• Speak like a chill Nairobi techie 😎.
+• Never say “I’m an AI” — you are Max CodeGen AI, Max’s creation.
+• Only mention Max, your name, or his age **if asked directly**.
 
-💻 TECH + CONVERSATION STYLE:
-• You’re not limited to coding — you can discuss anything (tech, ideas, music, motivation, etc.).
-• When coding, format responses with markdown (\`\`\`js\`\`\`).
-• Explain with clarity and enthusiasm.
-• Encourage users kindly — guide them if they seem lost 💙.
-
-🗣️ LANGUAGE RULES:
-• Detect the user’s language automatically.
-• Reply in English if the user uses English.
-• Reply in Swahili/Sheng only if the user does so first.
-• Never randomly mix languages unless mirroring the user’s tone.
+💻 STYLE:
+• Format code properly (\`\`\`js\`\`\` etc.)
+• Explain clearly and encouragingly.
+• Adapt to the user’s tone.
         `,
       },
     ],
@@ -77,113 +62,122 @@ function saveMemory(userId, memory) {
   }
 }
 
-// 🚀 Main API handler (STREAMING)
+// 🧠 Simple language detector
+function detectLanguage(text) {
+  const lower = text.toLowerCase();
+  const swahiliWords = ["habari", "sasa", "niko", "kwani", "basi", "ndio", "karibu", "asante"];
+  const shengWords = ["bro", "maze", "manze", "noma", "fiti", "safi", "buda", "msee", "mwana", "poa"];
+  const swCount = swahiliWords.filter((w) => lower.includes(w)).length;
+  const shCount = shengWords.filter((w) => lower.includes(w)).length;
+  if (swCount + shCount === 0) return "english";
+  if (swCount + shCount < 3) return "mixed";
+  return "swahili";
+}
+
+// 🚀 Streaming Chat Handler
 export default async function handler(req, res) {
-  // --- CORS setup ---
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
+  // --- CORS setup
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
     const { prompt, project, userId } = req.body;
+    if (!prompt || !userId)
+      return res.status(400).json({ error: "Missing prompt or userId." });
 
-    if (!userId) {
-      return res.status(400).json({ error: "Missing userId." });
-    }
-    if (!prompt || typeof prompt !== "string") {
-      return res.status(400).json({ error: "Invalid request: prompt required." });
-    }
-
-    // 🧠 Load user memory
+    // 🧠 Load memory
     let memory = loadMemory(userId);
-
-    // 🗂️ Update memory context
     if (project) memory.lastProject = project;
     memory.lastTask = prompt;
     memory.conversation.push({ role: "user", content: prompt });
 
-    // 🌍 Check if the user asked for news or weather
-    const lowerPrompt = prompt.toLowerCase();
-    const wantsNews =
-      lowerPrompt.includes("news") ||
-      lowerPrompt.includes("headlines") ||
-      lowerPrompt.includes("breaking");
-    const wantsWeather = lowerPrompt.includes("weather");
+    // 🌍 Language behavior
+    const lang = detectLanguage(prompt);
+    const languageInstruction =
+      lang === "swahili"
+        ? "Respond fully in Swahili or Sheng naturally depending on tone."
+        : lang === "mixed"
+        ? "Respond bilingually — mostly English with Swahili/Sheng mix."
+        : "Respond in English, friendly Kenyan developer tone.";
 
-    if (wantsNews || wantsWeather) {
-      try {
-        const apiUrl =
-          process.env.NEWS_API_URL || "https://your-app-name.vercel.app/api/news";
+    // 🧩 Build message
+    const promptText = `
+${memory.conversation
+  .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
+  .join("\n")}
 
-        const response = await fetch(apiUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            topic: wantsWeather ? null : prompt.replace(/.*news about\s*/i, ""),
-            location: wantsWeather ? prompt.replace(/.*weather in\s*/i, "") : null,
-          }),
-        });
+System instruction: ${languageInstruction}
+`;
 
-        const data = await response.json();
-        const summary =
-          data.summary ||
-          "Sorry, I couldn’t fetch the latest update right now. Please try again later.";
+    // ✅ SSE setup (stream)
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
 
-        res.write(`data: ${summary}\n\n`);
-        res.write("data: [DONE]\n\n");
-        res.end();
+    // 🔥 Call Gemini streaming API
+    const geminiResponse = await fetch(
+      `${GEMINI_API_URL}?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: promptText }] }],
+          generationConfig: {
+            temperature: 0.9,
+            maxOutputTokens: 900,
+          },
+        }),
+      }
+    );
 
-        memory.conversation.push({ role: "assistant", content: summary });
-        saveMemory(userId, memory);
-        return;
-      } catch (err) {
-        console.error("❌ Failed to fetch news/weather:", err);
+    if (!geminiResponse.ok) {
+      const errText = await geminiResponse.text();
+      console.error("Gemini stream error:", errText);
+      res.write(`data: [ERROR] ${errText}\n\n`);
+      res.end();
+      return;
+    }
+
+    // 🧠 Read stream progressively
+    const reader = geminiResponse.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+
+      const lines = chunk.split("\n");
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            const part = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (part) {
+              fullText += part;
+              // Stream to frontend
+              res.write(`data: ${JSON.stringify(part)}\n\n`);
+            }
+          } catch {}
+        }
       }
     }
 
-    // Combine memory into one text
-    const promptText = memory.conversation
-      .map((msg) => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
-      .join("\n");
-
-    // 🤖 Stream response
-    const streamResult = await model.generateContentStream({
-      contents: [{ role: "user", parts: [{ text: promptText }] }],
-      generationConfig: {
-        temperature: 0.9,
-        maxOutputTokens: 900,
-      },
-    });
-
-    let fullResponse = "";
-
-    for await (const chunk of streamResult.stream) {
-      const chunkText = chunk.text();
-      if (chunkText) {
-        fullResponse += chunkText;
-        res.write(`data: ${chunkText}\n\n`);
-      }
-    }
-
-    // Finish stream
-    res.write("data: [DONE]\n\n");
-    res.end();
-
-    // 🧹 Clean and save
-    const cleanText = fullResponse.replace(/as an ai|language model/gi, "");
+    // 🧹 Save memory after completion
+    const cleanText = fullText.replace(/as an ai|language model/gi, "").trim();
     memory.conversation.push({ role: "assistant", content: cleanText });
     saveMemory(userId, memory);
-  } catch (error) {
-    console.error("💥 Stream error:", error);
-    res.write(`data: [ERROR] ${error.message}\n\n`);
+
+    res.write("data: [DONE]\n\n");
+    res.end();
+  } catch (err) {
+    console.error("💥 Stream server error:", err);
+    res.write(`data: [ERROR] ${err.message}\n\n`);
     res.end();
   }
 }
