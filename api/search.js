@@ -4,18 +4,16 @@ export default async function handler(req, res) {
   if (req.method !== "POST")
     return res.status(405).json({ error: "Method not allowed" });
 
-  const { prompt } = req.body;
+  const { prompt } = req.body || {};
   if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
   try {
-    // 🔑 Ensure your SERPAPI_KEY is set
     const apiKey = process.env.SERPAPI_KEY;
-    if (!apiKey)
-      return res
-        .status(500)
-        .json({ error: "Missing SERPAPI_KEY in environment variables" });
+    if (!apiKey) {
+      console.error("❌ SERPAPI_KEY is missing from environment");
+      return res.status(500).json({ error: "Missing SERPAPI_KEY in environment variables" });
+    }
 
-    // Detect if it's news, image, or normal search
     const lower = prompt.toLowerCase();
     const endpoint = "https://serpapi.com/search.json";
     let params = {};
@@ -34,26 +32,34 @@ export default async function handler(req, res) {
     }
 
     const url = `${endpoint}?${new URLSearchParams(params).toString()}`;
-    console.log("🔍 Fetching SerpAPI:", url);
+    console.log("🔍 Fetching from SerpAPI:", url);
 
     const response = await fetch(url);
-    const rawText = await response.text();
+    const text = await response.text();
 
-    // Handle HTML or invalid JSON responses safely
+    // Log the first few characters of response (for debugging)
+    console.log("📦 Raw response snippet:", text.slice(0, 300));
+
     let data;
     try {
-      data = JSON.parse(rawText);
-    } catch {
-      console.error("⚠️ Invalid JSON returned by SerpAPI:", rawText);
-      return res
-        .status(500)
-        .json({ error: "Invalid response from SerpAPI. Check your key or query." });
+      data = JSON.parse(text);
+    } catch (err) {
+      console.error("⚠️ Failed to parse JSON from SerpAPI:", err);
+      return res.status(500).json({
+        error: "Invalid JSON from SerpAPI. Check API key or quota.",
+        raw: text.slice(0, 300),
+      });
+    }
+
+    if (data.error) {
+      console.error("⚠️ SerpAPI returned an error:", data.error);
+      return res.status(500).json({ error: data.error });
     }
 
     // 📰 NEWS
     if (data.news_results?.length) {
       const articles = data.news_results.slice(0, 5);
-      const text = articles
+      const textResult = articles
         .map(
           (a, i) =>
             `${i + 1}. <a href="${a.link}" target="_blank">${a.title}</a> — ${
@@ -61,7 +67,7 @@ export default async function handler(req, res) {
             }`
         )
         .join("<br>");
-      return res.json({ text });
+      return res.json({ text: textResult });
     }
 
     // 🖼️ IMAGES
@@ -73,22 +79,22 @@ export default async function handler(req, res) {
       });
     }
 
-    // 🌐 WEB RESULTS
+    // 🌐 GENERAL
     if (data.organic_results?.length) {
       const results = data.organic_results.slice(0, 4);
-      const text = results
+      const textResult = results
         .map(
           (r, i) =>
             `${i + 1}. <a href="${r.link}" target="_blank">${r.title}</a><br>${r.snippet || ""}`
         )
         .join("<br><br>");
-      return res.json({ text });
+      return res.json({ text: textResult });
     }
 
-    // ❌ No results
+    console.log("⚠️ No results found in SerpAPI data structure");
     return res.json({ text: "No relevant search results found 🧐" });
   } catch (error) {
-    console.error("💥 SerpAPI error:", error);
-    res.status(500).json({ error: "Search failed internally" });
+    console.error("💥 Uncaught server error:", error);
+    res.status(500).json({ error: error.message });
   }
 }
